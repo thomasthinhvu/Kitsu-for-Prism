@@ -1,90 +1,11 @@
 # -*- coding: utf-8 -*-
-#
-####################################################
-#
-# PRISM - Pipeline for animation and VFX projects
-#
-# www.prism-pipeline.com
-#
-# contact: contact@prism-pipeline.com
-#
-####################################################
-#
-#
-# Copyright (C) 2016-2020 Richard Frangenberg
-#
-# Licensed under GNU GPL-3.0-or-later
-#
-# This file is part of Prism.
-#
-# Prism is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# Prism is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Prism.  If not, see <https://www.gnu.org/licenses/>.
-
-'''
-v1.0.1
-Changelog:
-* Removed the "Remove empty asset types/empty episodes/sequences"-post check as it could conflict with other projects in Kitsu
-
-v1.0
-Changelog:
-* First release!
-
----
-
-Features:
-* Sync shots and assets between Kitsu and Prism including frame range, descriptions and thumbnails
-* Sync everything or only assigned shots and assets
-* Open shots and assets in Kitsu from Prism
-* Publish to Kitsu from Renders (If it's an image sequence it will convert it to a temp mov file before uploading and remove the local temp file after)
-* Post sync features:
-    * Checks if the other side has shots/assets on sync and asks if you want to sync back
-    * You can dissable post sync checks in the settings
-* When creating a new shot/asset in Prism you can add it directly to Kitsu
-* Does work with TV Shows but only Kitsu to Local, not the other way around (folder structure problems atm)
-
-Wanted features:
-* Posibility to sync comment and image from Save and comment within DCC apps
-* Make publishing videos multiprocessing so the user can use Prism while it's uploading.
-    https://stackoverflow.com/questions/18864859/python-executing-multiple-functions-simultaneously
-
-Todo:
-* Popup saying that it's uploading data to Kitsu
-* Check for updates in createShots() instead of making the new shot or nothing
-* Check for updates in createAsset() instead of making the new shot or nothing
-
-
-----
-
-Notes to EmptyProjectManagers script:
-* 'origin.seq' should be 'origin.mediaPlaybacks["shots"]["seq"]:'
-    under pbBrowser_getPublishMenu
-
-
-Fixes:
-* # str(shotName) == "no sequence-"
-* 'type(shotRange) == list' should be
-    'isinstance(shotRange, (list, yaml.comments.CommentedSeq)'
-        Also needs: import ruamel.yaml as yaml
-
-'''
-# Add UserInterfaces and external_modules to the paths
 from Prism_Kitsu_Tools_Functions import printText
 import add_external_folders
 
 import os
 import tempfile
 import shutil
-import ruamel.yaml as yaml
+import webbrowser
 
 from qt_compat import *
 
@@ -99,47 +20,99 @@ class Prism_Kitsu_Functions(object):
         self.core = core
         self.plugin = plugin
 
-        self.callbacks = []
-        self.registerCallbacks()
-
         self.project_dict = None
         self.tokens = None
         self.publish_type_dict = None
 
-    # Should plugin be active
+        self.callbacks = []
+        self.registerCallbacks()
+
     @err_catcher(name=__name__)
     def isActive(self):
         return True
 
-    # Add menus to Assets and Shots menu
+    # -------------------------------------------------------------------------
+    # HELPER ĐỌC/GHI CONFIG TƯƠNG THÍCH CẢ PRISM 2 VÀ PRISM 1
+    # -------------------------------------------------------------------------
+    def getPrjConfig(self, key, dft=None):
+        val = self.core.getConfig("kitsu", key, config="project")
+        if val is None and hasattr(self.core, "prismIni") and self.core.prismIni:
+            val = self.core.getConfig("kitsu", key, configPath=self.core.prismIni)
+        return dft if val is None else val
+
+    def setPrjConfig(self, key, val):
+        self.core.setConfig("kitsu", key, val=val, config="project")
+
+    def getUserConfig(self, key, dft=None):
+        val = self.core.getConfig("kitsu", key, config="user")
+        if val is None:
+            val = self.core.getConfig("kitsu", key)
+        return dft if val is None else val
+
+    def setUserConfig(self, key, val):
+        self.core.setConfig("kitsu", key, val=val, config="user")
+
+    # -------------------------------------------------------------------------
+    # ĐĂNG KÝ CALLBACKS CHUẨN PRISM 2
+    # -------------------------------------------------------------------------
     @err_catcher(name=__name__)
     def registerCallbacks(self):
-        self.callbacks.append(
-            self.core.registerCallback(
-                "projectBrowser_getAssetMenu",
-                self.projectBrowser_getAssetMenu
+        cb_map = [
+            ("onProjectChanged", self.onProjectChanged),
+            # User Settings
+            ("userSettings_loadUI", self.userSettings_loadUI),
+            ("prismSettings_loadUI", self.prismSettings_loadUI),
+            ("prismSettings_loadSettings", self.prismSettings_loadSettings),
+            ("prismSettings_saveSettings", self.prismSettings_saveSettings),
+            # Project Settings (Tách riêng trong Prism 2)
+            ("projectSettings_loadUI", self.projectSettings_loadUI),
+            ("postProjectSettingsLoad", self.postProjectSettingsLoad),
+            ("preProjectSettingsSave", self.preProjectSettingsSave),
+            # Project Browser & Context Menus
+            ("onProjectBrowserStartup", self.onProjectBrowserStartup),
+            ("openPBListContextMenu", self.openPBListContextMenu),
+            ("projectBrowser_getAssetMenu", self.projectBrowser_getAssetMenu),
+            ("projectBrowser_getShotMenu", self.projectBrowser_getShotMenu),
+            ("mediaBrowserContextMenuRequested", self.mediaBrowserContextMenuRequested),
+            # Entity Creation Dialogs
+            ("onAssetDlgOpen", self.createAsset_open),
+            ("onCreateAssetDlgOpen", self.createAsset_open),
+            ("onAssetCreated", self.onAssetCreated),
+            ("onShotDlgOpen", self.editShot_open),
+            ("onShotCreated", self.onShotCreated),
+        ]
+        for cb_name, cb_fn in cb_map:
+            self.callbacks.append(
+                self.core.registerCallback(cb_name, cb_fn, plugin=self)
             )
-        )
-        self.callbacks.append(
-            self.core.registerCallback(
-                "projectBrowser_getShotMenu",
-                self.projectBrowser_getShotMenu
-            )
-        )
 
-    # Run when project has bin changed to another
     @err_catcher(name=__name__)
-    def onProjectChanged(self, origin):
-        pass
+    def onProjectChanged(self, *args):
+        self.tokens = None
+        self.project_dict = None
 
-    # Create UI for Settings menus
+    # -------------------------------------------------------------------------
+    # GIAO DIỆN USER SETTINGS & PROJECT SETTINGS TRÊN PRISM 2
+    # -------------------------------------------------------------------------
+    @err_catcher(name=__name__)
+    def userSettings_loadUI(self, origin):
+        self._buildUserAccountUI(origin)
+
     @err_catcher(name=__name__)
     def prismSettings_loadUI(self, origin):
+        self._buildUserAccountUI(origin)
+        if hasattr(origin, "w_prjSettings"):
+            self._buildProjectSettingsUI(origin)
+
+    def _buildUserAccountUI(self, origin):
+        if hasattr(origin, "gb_ksuAccount"):
+            return
+
         origin.gb_ksuAccount = QGroupBox("Kitsu account")
         lo_ksu = QFormLayout()
         origin.gb_ksuAccount.setLayout(lo_ksu)
 
-        origin.l_ksuUserName = QLabel("Username:       ")
+        origin.l_ksuUserName = QLabel("Username (Email):")
         origin.e_ksuUserName = QLineEdit()
         origin.l_ksuUserPassword = QLabel("Password:")
         origin.e_ksuUserPassword = QLineEdit()
@@ -148,8 +121,25 @@ class Prism_Kitsu_Functions(object):
         lo_ksu.addRow(origin.l_ksuUserName, origin.e_ksuUserName)
         lo_ksu.addRow(origin.l_ksuUserPassword, origin.e_ksuUserPassword)
 
-        origin.tabWidgetPage1.layout().insertWidget(1, origin.gb_ksuAccount)
-        origin.groupboxes.append(origin.gb_ksuAccount)
+        # Gắn vào tab General/User của Prism 2 hoặc thêm tab mới
+        if hasattr(origin, "w_user") and origin.w_user.layout():
+            origin.w_user.layout().addWidget(origin.gb_ksuAccount)
+        elif hasattr(origin, "tabWidgetPage1") and origin.tabWidgetPage1.layout():
+            origin.tabWidgetPage1.layout().insertWidget(1, origin.gb_ksuAccount)
+        elif hasattr(origin, "addTab"):
+            w_tab = QWidget()
+            lo_tab = QVBoxLayout(w_tab)
+            lo_tab.addWidget(origin.gb_ksuAccount)
+            lo_tab.addStretch()
+            origin.addTab(w_tab, "Kitsu")
+
+    @err_catcher(name=__name__)
+    def projectSettings_loadUI(self, origin):
+        self._buildProjectSettingsUI(origin)
+
+    def _buildProjectSettingsUI(self, origin):
+        if hasattr(origin, "gb_ksuIntegration"):
+            return
 
         origin.gb_ksuIntegration = QGroupBox("Kitsu integration")
         origin.w_Kitsu = QWidget()
@@ -165,47 +155,55 @@ class Prism_Kitsu_Functions(object):
         origin.formLayout = QFormLayout()
         origin.l_ksuSite = QLabel("Kitsu site:")
         origin.e_ksuSite = QLineEdit()
-        origin.formLayout.setWidget(0, QFormLayout.LabelRole, origin.l_ksuSite)
-        origin.formLayout.setWidget(0, QFormLayout.FieldRole, origin.e_ksuSite)
-
         origin.l_ksuPrjName = QLabel("Project Name:")
         origin.e_ksuPrjName = QLineEdit()
-        origin.formLayout.setWidget(
-            1, QFormLayout.LabelRole, origin.l_ksuPrjName)
-        origin.formLayout.setWidget(
-            1, QFormLayout.FieldRole, origin.e_ksuPrjName)
 
+        origin.formLayout.addRow(origin.l_ksuSite, origin.e_ksuSite)
+        origin.formLayout.addRow(origin.l_ksuPrjName, origin.e_ksuPrjName)
         lo_ksu2.addLayout(origin.formLayout)
 
         origin.horizontalLayout = QHBoxLayout()
         origin.chb_syncUserTasks = QCheckBox("Only sync user assigned tasks")
         origin.chb_syncUserTasks.setChecked(True)
         origin.horizontalLayout.addWidget(origin.chb_syncUserTasks)
+
         origin.ignorePostSync = QCheckBox("Ignore post sync checks")
         origin.ignorePostSync.setChecked(False)
         origin.horizontalLayout.addWidget(origin.ignorePostSync)
+
         origin.setFirstFrameOne = QCheckBox(
-            "Set first frame to 1 (if only frames is set)")
+            "Set first frame to 1 (if only frames is set)"
+        )
         origin.setFirstFrameOne.setChecked(False)
         origin.horizontalLayout.addWidget(origin.setFirstFrameOne)
-
         lo_ksu2.addLayout(origin.horizontalLayout)
 
         origin.b_checkLogin = QPushButton("Check login")
         origin.b_checkLogin.clicked.connect(
             lambda: self.check_connection(
-                {"ksuSite": origin.e_ksuSite.text(),
-                 "ksuUsername": origin.e_ksuUserName.text(),
-                 "ksuPw": origin.e_ksuUserPassword.text(),
-                 "ksuProjectName": origin.e_ksuPrjName.text()}
+                {
+                    "ksuSite": origin.e_ksuSite.text(),
+                    "ksuUsername": (
+                        origin.e_ksuUserName.text()
+                        if hasattr(origin, "e_ksuUserName")
+                        else self.getUserConfig("ksuusername", "")
+                    ),
+                    "ksuPw": (
+                        origin.e_ksuUserPassword.text()
+                        if hasattr(origin, "e_ksuUserPassword")
+                        else self.getUserConfig("ksuuserpassword", "")
+                    ),
+                    "ksuProjectName": origin.e_ksuPrjName.text(),
+                }
             )
         )
         lo_ksu2.addWidget(origin.b_checkLogin)
 
         origin.stepMappingLayout = QVBoxLayout()
-        origin.l_stepMapping = QLabel("Prism and Kitsu Step Mappings")
+        origin.l_stepMapping = QLabel("Prism Department and Kitsu Task Mappings")
         origin.l_stepMapping.setMinimumHeight(30)
         origin.stepMappingLayout.addWidget(origin.l_stepMapping)
+
         origin.tw_steps = QTableWidget()
         origin.tw_steps.setMinimumHeight(250)
         origin.tw_steps.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -215,99 +213,105 @@ class Prism_Kitsu_Functions(object):
         origin.tw_steps.horizontalHeader().setStretchLastSection(True)
         origin.tw_steps.verticalHeader().setVisible(False)
         origin.tw_steps.verticalHeader().setHighlightSections(False)
-        origin.tw_steps.setHorizontalHeaderLabels(["Prism Step", "Kitsu Step"])
+        origin.tw_steps.setHorizontalHeaderLabels(["Prism Department/Step", "Kitsu Task Type"])
         origin.stepMappingLayout.addWidget(origin.tw_steps)
         lo_ksu2.addLayout(origin.stepMappingLayout)
 
-        origin.w_prjSettings.layout().insertWidget(5, origin.gb_ksuIntegration)
-        origin.groupboxes.append(origin.gb_ksuIntegration)
+        if hasattr(origin, "w_prjSettings") and origin.w_prjSettings.layout():
+            origin.w_prjSettings.layout().insertWidget(5, origin.gb_ksuIntegration)
+        elif hasattr(origin, "tw_settings"):
+            w_tab = QWidget()
+            lo_tab = QVBoxLayout(w_tab)
+            lo_tab.addWidget(origin.gb_ksuIntegration)
+            lo_tab.addStretch()
+            origin.tw_settings.addTab(w_tab, "Kitsu")
+        elif hasattr(origin, "addTab"):
+            origin.addTab(origin.gb_ksuIntegration, "Kitsu")
 
         origin.gb_ksuIntegration.toggled.connect(
             lambda x: self.prismSettings_ksuToggled(origin, x)
         )
 
-    # Load Prism specific settings
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def check_connection(self, custom_login):
         self.tokens = None
         self.connectToKitsu(custom_login)
 
-    # Load Prism specific settings
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def prismSettings_loadSettings(self, origin, settings):
-        if "kitsu" in settings:
-            if "ksuusername" in settings["kitsu"]:
-                origin.e_ksuUserName.setText(settings["kitsu"]["ksuusername"])
-
-            if "ksuuserpassword" in settings["kitsu"]:
-                origin.e_ksuUserPassword.setText(
-                    settings["kitsu"]["ksuuserpassword"])
-
-    # Load Project specific settings
-    @ err_catcher(name=__name__)
-    def prismSettings_loadPrjSettings(self, origin, settings):
-        if "kitsu" in settings:
-
-            if "active" in settings["kitsu"]:
-                origin.gb_ksuIntegration.setChecked(
-                    settings["kitsu"]["active"])
-
-            if "site" in settings["kitsu"]:
-                origin.e_ksuSite.setText(settings["kitsu"]["site"])
-
-            if "projectname" in settings["kitsu"]:
-                origin.e_ksuPrjName.setText(settings["kitsu"]["projectname"])
-
-            if "usersync" in settings["kitsu"]:
-                origin.chb_syncUserTasks.setChecked(
-                    settings["kitsu"]["usersync"])
-
-            if "ignorepostchecks" in settings["kitsu"]:
-                origin.ignorePostSync.setChecked(
-                    settings["kitsu"]["ignorepostchecks"])
-
-            if "setfirstframeone" in settings["kitsu"]:
-                origin.ignorePostSync.setChecked(
-                    settings["kitsu"]["setfirstframeone"])
-
-            if "mapping" in settings["kitsu"]:
-                stepMapping = settings["kitsu"]["mapping"]
-                for prismMap in stepMapping:
-                    rows = origin.tw_steps.rowCount()
-                    origin.tw_steps.insertRow(rows)
-                    prismStepItem = QTableWidgetItem(prismMap)
-                    origin.tw_steps.setItem(rows, 0, prismStepItem)
-                    kitsuStepItem = QTableWidgetItem(stepMapping[prismMap])
-                    origin.tw_steps.setItem(rows, 1, kitsuStepItem)
-            else:
-                self.populateMappingTable(origin)
-
+        if not hasattr(origin, "e_ksuUserName"):
+            return
+        if settings and "kitsu" in settings:
+            origin.e_ksuUserName.setText(settings["kitsu"].get("ksuusername", ""))
+            origin.e_ksuUserPassword.setText(
+                settings["kitsu"].get("ksuuserpassword", "")
+            )
         else:
+            origin.e_ksuUserName.setText(self.getUserConfig("ksuusername", ""))
+            origin.e_ksuUserPassword.setText(
+                self.getUserConfig("ksuuserpassword", "")
+            )
 
+    @err_catcher(name=__name__)
+    def postProjectSettingsLoad(self, origin, settings):
+        self.prismSettings_loadPrjSettings(origin, settings)
+
+    @err_catcher(name=__name__)
+    def prismSettings_loadPrjSettings(self, origin, settings):
+        if not hasattr(origin, "gb_ksuIntegration"):
+            return
+
+        ksu_cfg = (settings or {}).get("kitsu")
+        if ksu_cfg is None:
+            ksu_cfg = self.core.getConfig("kitsu", config="project") or {}
+
+        origin.gb_ksuIntegration.setChecked(bool(ksu_cfg.get("active", False)))
+        origin.e_ksuSite.setText(str(ksu_cfg.get("site", "")))
+        origin.e_ksuPrjName.setText(str(ksu_cfg.get("projectname", "")))
+        origin.chb_syncUserTasks.setChecked(bool(ksu_cfg.get("usersync", True)))
+        origin.ignorePostSync.setChecked(bool(ksu_cfg.get("ignorepostchecks", False)))
+        # Đã sửa lỗi copy-paste nhầm sang ignorePostSync ở bản cũ
+        origin.setFirstFrameOne.setChecked(bool(ksu_cfg.get("setfirstframeone", False)))
+
+        origin.tw_steps.setRowCount(0)
+        stepMapping = ksu_cfg.get("mapping")
+        if isinstance(stepMapping, dict) and len(stepMapping) > 0:
+            for prismMap, kitsuMap in stepMapping.items():
+                rows = origin.tw_steps.rowCount()
+                origin.tw_steps.insertRow(rows)
+                origin.tw_steps.setItem(rows, 0, QTableWidgetItem(str(prismMap)))
+                origin.tw_steps.setItem(rows, 1, QTableWidgetItem(str(kitsuMap)))
+        else:
             self.populateMappingTable(origin)
 
-        self.prismSettings_ksuToggled(origin,
-                                      origin.gb_ksuIntegration.isChecked())
+        self.prismSettings_ksuToggled(origin, origin.gb_ksuIntegration.isChecked())
 
-    # Save Prism specific settings
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def prismSettings_saveSettings(self, origin, settings):
-        if "kitsu" not in settings:
-            settings["kitsu"] = {}
+        if not hasattr(origin, "e_ksuUserName"):
+            return
+        if settings is not None:
+            if "kitsu" not in settings:
+                settings["kitsu"] = {}
+            settings["kitsu"]["ksuusername"] = origin.e_ksuUserName.text()
+            settings["kitsu"]["ksuuserpassword"] = origin.e_ksuUserPassword.text()
 
-        settings["kitsu"]["ksuuseaccount"] = origin.gb_ksuAccount.isChecked()
-        settings["kitsu"]["ksuusername"] = origin.e_ksuUserName.text()
-        settings["kitsu"]["ksuuserpassword"] = origin.e_ksuUserPassword.text()
+    @err_catcher(name=__name__)
+    def preProjectSettingsSave(self, origin, settings):
+        self.prismSettings_savePrjSettings(origin, settings)
 
-    # Save project specific settings
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def prismSettings_savePrjSettings(self, origin, settings):
+        if not hasattr(origin, "gb_ksuIntegration"):
+            return
+        if settings is None:
+            settings = {}
         if "kitsu" not in settings:
             settings["kitsu"] = {}
 
         settings["kitsu"]["active"] = origin.gb_ksuIntegration.isChecked()
-        settings["kitsu"]["site"] = origin.e_ksuSite.text()
-        settings["kitsu"]["projectname"] = origin.e_ksuPrjName.text()
+        settings["kitsu"]["site"] = origin.e_ksuSite.text().strip()
+        settings["kitsu"]["projectname"] = origin.e_ksuPrjName.text().strip()
         settings["kitsu"]["usersync"] = origin.chb_syncUserTasks.isChecked()
         settings["kitsu"]["ignorepostchecks"] = origin.ignorePostSync.isChecked()
         settings["kitsu"]["setfirstframeone"] = origin.setFirstFrameOne.isChecked()
@@ -315,284 +319,253 @@ class Prism_Kitsu_Functions(object):
         stepMapping = {}
         rows = origin.tw_steps.rowCount()
         for i in range(rows):
-            prismMap = origin.tw_steps.item(i, 0).text()
-            kitsuMap = origin.tw_steps.item(i, 1).text()
-            stepMapping[prismMap] = kitsuMap
+            item_p = origin.tw_steps.item(i, 0)
+            item_k = origin.tw_steps.item(i, 1)
+            prismMap = item_p.text().strip() if item_p else ""
+            kitsuMap = item_k.text().strip() if item_k else ""
+            if prismMap:
+                stepMapping[prismMap] = kitsuMap
         settings["kitsu"]["mapping"] = stepMapping
 
-    # Toggle visibility of toggle-objects
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def prismSettings_ksuToggled(self, origin, checked):
-        origin.w_Kitsu.setVisible(checked)
-        origin.gb_ksuAccount.setVisible(checked)
+        if hasattr(origin, "w_Kitsu"):
+            origin.w_Kitsu.setVisible(checked)
+        if hasattr(origin, "gb_ksuAccount"):
+            origin.gb_ksuAccount.setVisible(checked)
 
-    # Add objects to Project Brower's Options menu
-    @ err_catcher(name=__name__)
+    # -------------------------------------------------------------------------
+    # MENU KITSU TRÊN PROJECT BROWSER CỦA PRISM 2
+    # -------------------------------------------------------------------------
+    @err_catcher(name=__name__)
+    def onProjectBrowserStartup(self, origin):
+        ksuMenu = self.pbBrowser_getMenu(origin)
+        if ksuMenu and hasattr(origin, "menubar"):
+            origin.menubar.addMenu(ksuMenu)
+
+    @err_catcher(name=__name__)
     def pbBrowser_getMenu(self, origin):
-        ksu = self.core.getConfig("kitsu",
-                                  "active",
-                                  configPath=self.core.prismIni)
+        ksu = self.getPrjConfig("active", dft=False)
+        if not ksu:
+            return None
 
-        if ksu:
-            ksuMenu = QMenu("Kitsu")
+        ksuMenu = QMenu("Kitsu", origin)
 
-            actksu = QAction("Open Kitsu", origin)
-            actksu.triggered.connect(lambda: self.openKitsu("", "project"))
-            ksuMenu.addAction(actksu)
+        actksu = QAction("Open Kitsu Project in Browser", origin)
+        actksu.triggered.connect(lambda: self.openKitsu("", "project"))
+        ksuMenu.addAction(actksu)
 
-            ksuMenu.addSeparator()
+        ksuMenu.addSeparator()
 
-            actSSL = QAction("Kitsu assets to local", origin)
-            actSSL.triggered.connect(lambda: self.ksuAssetsToLocal(origin))
-            ksuMenu.addAction(actSSL)
+        actASL = QAction("Kitsu assets to local", origin)
+        actASL.triggered.connect(lambda: self.ksuAssetsToLocal(origin))
+        ksuMenu.addAction(actASL)
 
-            actSSL = QAction("Local assets to Kitsu", origin)
-            actSSL.triggered.connect(lambda: self.ksuAssetsToKitsu(origin))
-            ksuMenu.addAction(actSSL)
+        actLAS = QAction("Local assets to Kitsu", origin)
+        actLAS.triggered.connect(lambda: self.ksuAssetsToKitsu(origin))
+        ksuMenu.addAction(actLAS)
 
-            ksuMenu.addSeparator()
+        ksuMenu.addSeparator()
 
-            actSSL = QAction("Kitsu shots to local", origin)
-            actSSL.triggered.connect(lambda: self.ksuShotsToLocal(origin))
-            ksuMenu.addAction(actSSL)
+        actSSL = QAction("Kitsu shots to local", origin)
+        actSSL.triggered.connect(lambda: self.ksuShotsToLocal(origin))
+        ksuMenu.addAction(actSSL)
 
-            actLSS = QAction("Local shots to Kitsu", origin)
-            actLSS.triggered.connect(lambda: self.ksuShotsToKitsu(origin))
-            ksuMenu.addAction(actLSS)
+        actLSS = QAction("Local shots to Kitsu", origin)
+        actLSS.triggered.connect(lambda: self.ksuShotsToKitsu(origin))
+        ksuMenu.addAction(actLSS)
 
-            return ksuMenu
+        return ksuMenu
 
-    # The menu when right-clicking on an asset
-    @ err_catcher(name=__name__)
-    def projectBrowser_getAssetMenu(self,
-                                    origin,
-                                    assetname,
-                                    assetPath,
-                                    entityType):
+    @err_catcher(name=__name__)
+    def openPBListContextMenu(self, origin, rcmenu, listWidget, item, path, *args):
+        """Hỗ trợ menu chuột phải vào Shot / Asset trong EntityWidget của Prism 2."""
+        if not self.getPrjConfig("active", dft=False):
+            return
+        if not hasattr(origin, "getCurrentEntities"):
+            return
 
-        ksu = self.core.getConfig("kitsu",
-                                  "active",
-                                  configPath=self.core.prismIni)
+        entities = origin.getCurrentEntities()
+        if not entities or len(entities) != 1:
+            return
 
-        if ksu:
+        entity = entities[0]
+        e_type = entity.get("type")
+        if e_type == "asset":
+            asset_name = os.path.basename(entity.get("asset_path", ""))
+            ksuAct = QAction("Open in Kitsu", rcmenu)
+            ksuAct.triggered.connect(lambda: self.openKitsu(asset_name, "asset"))
+            rcmenu.addAction(ksuAct)
+        elif e_type == "shot":
+            shot_key = self._getShotKey(entity.get("sequence", ""), entity.get("shot", ""), entity.get("episode"))
+            ksuAct = QAction("Open in Kitsu", rcmenu)
+            ksuAct.triggered.connect(lambda: self.openKitsu(shot_key, "shot"))
+            rcmenu.addAction(ksuAct)
+
+    @err_catcher(name=__name__)
+    def projectBrowser_getAssetMenu(self, origin, *args):
+        if not self.getPrjConfig("active", dft=False):
+            return
+        # Tương thích cả chữ ký hàm Prism 1 và Prism 2
+        if len(args) >= 2 and isinstance(args[0], QMenu):
+            menu, entity = args[0], args[1]
+            asset_name = os.path.basename(entity.get("asset_path", "")) if isinstance(entity, dict) else str(entity)
+            ksuAct = QAction("Open in Kitsu", menu)
+            ksuAct.triggered.connect(lambda: self.openKitsu(asset_name, "asset"))
+            menu.addAction(ksuAct)
+        elif len(args) >= 1:
+            assetname = args[0]
             ksuAct = QAction("Open in Kitsu", origin)
-            ksuAct.triggered.connect(
-                lambda: self.openKitsu(assetname, "asset"))
+            ksuAct.triggered.connect(lambda: self.openKitsu(assetname, "asset"))
             return ksuAct
 
-    # The menu when right-clicking on a shot
-    @ err_catcher(name=__name__)
-    def projectBrowser_getShotMenu(self, origin, shotname):
-        ksu = self.core.getConfig("kitsu",
-                                  "active",
-                                  configPath=self.core.prismIni)
-
-        if ksu:
+    @err_catcher(name=__name__)
+    def projectBrowser_getShotMenu(self, origin, *args):
+        if not self.getPrjConfig("active", dft=False):
+            return
+        if len(args) >= 2 and isinstance(args[0], QMenu):
+            menu, entity = args[0], args[1]
+            if isinstance(entity, dict):
+                shot_key = self._getShotKey(entity.get("sequence", ""), entity.get("shot", ""), entity.get("episode"))
+            else:
+                shot_key = str(entity)
+            ksuAct = QAction("Open in Kitsu", menu)
+            ksuAct.triggered.connect(lambda: self.openKitsu(shot_key, "shot"))
+            menu.addAction(ksuAct)
+        elif len(args) >= 1:
+            shotname = args[0]
             ksuAct = QAction("Open in Kitsu", origin)
             ksuAct.triggered.connect(lambda: self.openKitsu(shotname, "shot"))
             return ksuAct
 
-    # Extra GUI in the create asset window
-    @ err_catcher(name=__name__)
-    def createAsset_open(self, origin):
-        ksu = self.core.getConfig("kitsu",
-                                  "active",
-                                  configPath=self.core.prismIni)
-
-        if not ksu:
+    # -------------------------------------------------------------------------
+    # HOOK KHI TẠO ASSET / SHOT TRONG PRISM 2
+    # -------------------------------------------------------------------------
+    @err_catcher(name=__name__)
+    def createAsset_open(self, origin, *args):
+        if not self.getPrjConfig("active", dft=False):
             return
+        if hasattr(origin, "w_options") and origin.w_options.layout():
+            origin.chb_createInKitsu = QCheckBox("Create asset in Kitsu")
+            origin.w_options.layout().insertWidget(0, origin.chb_createInKitsu)
+            origin.chb_createInKitsu.setChecked(True)
+        elif hasattr(origin, "layout") and origin.layout():
+            origin.chb_createInKitsu = QCheckBox("Create asset in Kitsu")
+            origin.layout().addWidget(origin.chb_createInKitsu)
+            origin.chb_createInKitsu.setChecked(True)
 
-        origin.chb_createInKitsu = QCheckBox("Create asset in Kitsu")
-        origin.w_options.layout().insertWidget(0, origin.chb_createInKitsu)
-        origin.chb_createInKitsu.setChecked(True)
+    @err_catcher(name=__name__)
+    def onAssetCreated(self, origin, entity, dlg=None, *args):
+        if not self.getPrjConfig("active", dft=False):
+            return
+        check_dlg = dlg or origin
+        if hasattr(check_dlg, "chb_createInKitsu") and not check_dlg.chb_createInKitsu.isChecked():
+            return
+        if isinstance(entity, dict) and entity.get("asset_path"):
+            full_path = os.path.join(self._getAssetBasePath(), entity["asset_path"])
+            self.createAssets([full_path])
 
-    # When switching the toggle in the create asset menu
-    @ err_catcher(name=__name__)
-    def createAsset_typeChanged(self, origin, state):
-        if hasattr(origin, "chb_createInKitsu"):
-            origin.chb_createInKitsu.setEnabled(state)
-
-    # When created a new asset
-    @ err_catcher(name=__name__)
-    def assetCreated(self, origin, itemDlg, assetPath):
-        if (
-            hasattr(itemDlg, "chb_createInKitsu")
-            and itemDlg.chb_createInKitsu.isChecked()
-        ):
-            self.createAssets([assetPath])
-
-    # Add GUI when editing/adding shots
-    @ err_catcher(name=__name__)
-    def editShot_open(self, origin, shotName):
-        # Hack until shotName fix
-        # (https://github.com/RichardFrangenberg/Prism/pull/24)
-        if shotName is None or str(shotName) == "no sequence-":
-            ksu = self.core.getConfig("kitsu",
-                                      "active",
-                                      configPath=self.core.prismIni)
-
-            if not ksu:
-                return
-
+    @err_catcher(name=__name__)
+    def editShot_open(self, origin, entity=None, *args):
+        if not self.getPrjConfig("active", dft=False):
+            return
+        if hasattr(origin, "widget") and origin.widget.layout():
             origin.chb_createInKitsu = QCheckBox("Create shot in Kitsu")
             origin.widget.layout().insertWidget(0, origin.chb_createInKitsu)
             origin.chb_createInKitsu.setChecked(True)
 
-    # Run when editshot ui clises
-    @ err_catcher(name=__name__)
-    def editShot_closed(self, origin, shotName):
-        if (hasattr(origin, "chb_createInKitsu")
-                and origin.chb_createInKitsu.isChecked()):
-            self.createShots([shotName])
+    @err_catcher(name=__name__)
+    def onShotCreated(self, origin, entity, *args):
+        if not self.getPrjConfig("active", dft=False):
+            return
+        if hasattr(origin, "chb_createInKitsu") and not origin.chb_createInKitsu.isChecked():
+            return
+        if isinstance(entity, dict) and entity.get("shot"):
+            shot_key = self._getShotKey(entity.get("sequence", ""), entity.get("shot", ""), entity.get("episode"))
+            self.createShots([shot_key])
 
-    # When rightclicking on the preview window
-    @ err_catcher(name=__name__)
-    def pbBrowser_getPublishMenu(self, origin):
-        ksu = self.core.getConfig("kitsu",
-                                  "active",
-                                  configPath=self.core.prismIni)
+    # -------------------------------------------------------------------------
+    # PUBLISH TỪ MEDIA BROWSER CỦA PRISM 2
+    # -------------------------------------------------------------------------
+    @err_catcher(name=__name__)
+    def mediaBrowserContextMenuRequested(self, origin, menu, *args):
+        if not self.getPrjConfig("active", dft=False):
+            return
+        ksuAct = QAction("Publish to Kitsu", menu)
+        ksuAct.triggered.connect(lambda: self.ksuPublishPrism2(origin))
+        menu.addAction(ksuAct)
 
-        if (ksu and origin.mediaPlaybacks["shots"]["seq"]):
-            ksuAct = QAction("Publish to Kitsu", origin)
-            ksuAct.triggered.connect(lambda: self.ksuPublish(origin))
-            return ksuAct
-
-    # Connect to your Kitsu server
-    def connectToKitsu(self, custom_login=False):
-        if self.tokens is not None:
-            return True
-        else:
-            if custom_login is False:
-                ksuSite = self.core.getConfig("kitsu",
-                                              "site",
-                                              configPath=self.core.prismIni)
-
-                ksuProjectName = self.core.getConfig("kitsu",
-                                                     "projectname",
-                                                     configPath=self.core.prismIni)
-            else:
-                ksuSite = custom_login["ksuSite"]
-                ksuProjectName = custom_login["ksuProjectName"]
-
-            if (not ksuSite or not ksuProjectName):
-                QMessageBox.warning(
-                    self.core.messageParent,
-                    "Kitsu",
-                    "Not all required information for the kitsu integration are configured.\
-                    \nPlease check Project Settings.",
-                )
-                return False
-
-            if custom_login is False:
-                ksuUsername = self.core.getConfig("kitsu", "ksuusername")
-                ksuPw = self.core.getConfig("kitsu", "ksuuserpassword")
-            else:
-                ksuUsername = custom_login["ksuUsername"]
-                ksuPw = custom_login["ksuPw"]
-
-            if (
-                not ksuUsername
-                or not ksuPw
-            ):
-                QMessageBox.warning(
-                    self.core.messageParent,
-                    "Kitsu",
-                    "Not all required information for the kitsu user login are configured.\
-                    \nPlease check User settings",
-                )
-                return False
-
-            try:
-                self.project_dict = Connect(self,
-                                            ksuSite,
-                                            ksuUsername,
-                                            ksuPw,
-                                            ksuProjectName)
-
-            except Exception as e:
-                raise e
-
-            if self.project_dict is None:
-                QMessageBox.warning(
-                    self.core.messageParent, "Kitsu Sync", "The project \""
-                    + ksuProjectName
-                    + "\" could not be found in Kitsu."
-                )
-
-            return True
-
-    # Publish file to Kitsu
-
-    @ err_catcher(name=__name__)
-    def ksuPublish(self, origin):
-        connected = self.connectToKitsu()
-        if connected is False:
+    @err_catcher(name=__name__)
+    def ksuPublishPrism2(self, media_browser):
+        if not self.connectToKitsu():
             return
 
-        # Get object
-        objectName = os.path.basename(origin.renderBasePath)
+        entity = media_browser.getCurrentEntity() if hasattr(media_browser, "getCurrentEntity") else None
+        if not entity:
+            QMessageBox.warning(self.core.messageParent, "Kitsu Publish", "No entity selected.")
+            return
 
-        # What type is the object
-        if origin.tbw_browser.currentWidget().property("tabType") == "Assets":
+        e_type = entity.get("type", "shot")
+        if e_type == "asset":
             pType = "Asset"
-        else:
-            pType = "Shot"
-
-        # Get ID from objectName
-        if pType == "Asset":
+            objectName = os.path.basename(entity.get("asset_path", ""))
             objectID = getID(self, objectName, "Assetinfo")
         else:
+            pType = "Shot"
+            objectName = self._getShotKey(entity.get("sequence", ""), entity.get("shot", ""), entity.get("episode"))
             objectID = getID(self, objectName, "Shotinfo")
 
-        if doEntityExist(objectID) is False:
+        if not doEntityExist(objectID):
             QMessageBox.warning(
                 self.core.messageParent,
                 "Kitsu Publish",
-                "This " + pType.lower() + " does not exist on Kitsu.\nPlease sync to Kitsu before publishing."
+                f"This {pType.lower()} ({objectName}) does not exist on Kitsu.\nPlease sync to Kitsu before publishing.",
             )
-
-            # Remove ID that no longer exists from config file
-            if objectID is not None:
-                if pType == "Asset":
-                    removeID(self, objectName, "Assetinfo")
-                else:
-                    removeID(self, objectName, "Shotinfo")
-
             return
 
-        # Get task type dict
-        self.publish_type_dict, type_status_dict, set_preview, comment_text = getPublishTypeDict(self,
-                                                                                                 pType,
-                                                                                                 doStatus=True)
-        if self.publish_type_dict is None:
+        res = getPublishTypeDict(self, pType, doStatus=True)
+        if not res or res[0] is None:
+            return
+        self.publish_type_dict, type_status_dict, set_preview, comment_text = res
+
+        cur_version = media_browser.getCurrentVersion() if hasattr(media_browser, "getCurrentVersion") else {}
+        taskName = cur_version.get("identifier", "render") if isinstance(cur_version, dict) else "render"
+        versionName = cur_version.get("version", "v0001") if isinstance(cur_version, dict) else "v0001"
+
+        files = media_browser.getCurrentSourceFiles() if hasattr(media_browser, "getCurrentSourceFiles") else []
+        if not files and hasattr(media_browser, "lw_version"):
+            item = media_browser.lw_version.currentItem()
+            if item and item.data(Qt.UserRole):
+                data = item.data(Qt.UserRole)
+                if isinstance(data, dict) and data.get("path"):
+                    files = self.core.media.getFilesFromFolder(data["path"])
+
+        if not files:
+            QMessageBox.warning(self.core.messageParent, "Kitsu Publish", "No media files found to publish.")
             return
 
-        taskName = (origin.curRTask.replace(" (playblast)", "")
-                    .replace(" (2d)", "")
-                    .replace(" (external)", ""))
-
-        versionName = origin.curRVersion.replace(" (local)", "")
-        mediaPlayback = origin.mediaPlaybacks["shots"]
-
-        videoPaths = []
-        # Convert to mp4
+        ext = os.path.splitext(files[0])[1].lower()
+        is_video = ext in [".mp4", ".mov", ".avi", ".webm", ".mkv"]
         temp_folder = None
-        if mediaPlayback["prvIsSequence"]:
+        videoPaths = []
+
+        if not is_video and len(files) >= 1:
             temp_folder = tempfile.mkdtemp()
-            outputpath = self.convertSeqToVideo(origin, temp_folder)
-            videoPaths.append(outputpath)
+            outputpath = os.path.join(temp_folder, f"{objectName}_{taskName}_{versionName}.mp4")
+            inputpath = files[0]
+            if len(files) > 1:
+                pad = getattr(self.core, "framePadding", 4)
+                base_no_ext = os.path.splitext(inputpath)[0]
+                inputpath = base_no_ext[:-pad] + f"%0{pad}d" + ext
+            self.core.media.convertMedia(inputpath, 1001, outputpath)
+            if os.path.isfile(outputpath):
+                videoPaths.append(outputpath)
+            else:
+                videoPaths.append(files[0])
         else:
-            for i in mediaPlayback["seq"]:
-                videoPaths.append(os.path.abspath(
-                    os.path.join(mediaPlayback["basePath"], i))
-                )
+            videoPaths.append(files[0])
 
-        # get user email
-        user_email = self.core.getConfig("kitsu",
-                                         "ksuusername",
-                                         configPath=self.core.userini)
-
-        # Start uploading revisions
+        user_email = self.getUserConfig("ksuusername", "")
         for video_URL in videoPaths:
             uploadRevision(
                 objectID,
@@ -601,103 +574,162 @@ class Prism_Kitsu_Functions(object):
                 type_status_dict,
                 user_email,
                 set_preview,
-                comment=taskName + " " + versionName + " - " + comment_text
+                comment=f"{taskName} {versionName} - {comment_text}",
             )
 
-        # Clean up potential temp_folder
-        if temp_folder is not None:
-            shutil.rmtree(temp_folder)
+        if temp_folder and os.path.isdir(temp_folder):
+            shutil.rmtree(temp_folder, ignore_errors=True)
 
         QMessageBox.information(
             self.core.messageParent,
             "Kitsu Publish",
-            ("'" + taskName + " " + versionName
-             + "' was published to "
-             + self.publish_type_dict["name"] + " for the " + pType.lower()
-             + " '" + objectName + "'")
+            f"'{taskName} {versionName}' was published to {self.publish_type_dict['name']} for {pType.lower()} '{objectName}'",
         )
-
-        # Clear the publishing type dict
         self.publish_type_dict = None
 
-    # Convert footage (code from ProjectBrowser.py
-    def convertSeqToVideo(self, origin, temp_folder_name):
-        mediaPlayback = origin.mediaPlaybacks["shots"]
-        extension = ".mov"
+    # -------------------------------------------------------------------------
+    # KẾT NỐI KITSU SERVER
+    # -------------------------------------------------------------------------
+    def connectToKitsu(self, custom_login=False):
+        if self.tokens is not None and isinstance(self.project_dict, dict):
+            return True
 
-        inputpath = os.path.join(
-            mediaPlayback["basePath"], mediaPlayback["seq"][0]
-        ).replace("\\", "/")
-        inputExt = os.path.splitext(inputpath)[1]
-
-        outputpath = os.path.join(temp_folder_name,
-                                  os.path.splitext(mediaPlayback["seq"][0])[0]
-                                  + extension)
-
-        if mediaPlayback["prvIsSequence"]:
-            inputpath = os.path.splitext(inputpath)[0]
-            inputpath = inputpath[:-self.core.framePadding] + \
-                "%04d".replace("4", str(self.core.framePadding)) + inputExt
-
-        conversionSettings = {}
-        conversionSettings["-c"] = "prores"
-        conversionSettings["-profile"] = 2
-        conversionSettings["-pix_fmt"] = "yuv422p10le"
-
-        if mediaPlayback["prvIsSequence"]:
-            startNum = mediaPlayback["pstart"]
+        silent = False
+        if custom_login is False:
+            ksuSite = self.getPrjConfig("site", "")
+            ksuProjectName = self.getPrjConfig("projectname", "")
+            ksuUsername = self.getUserConfig("ksuusername", "")
+            ksuPw = self.getUserConfig("ksuuserpassword", "")
+            silent = True
         else:
-            startNum = 0
-            if inputExt == ".dpx":
-                conversionSettings["-start_number"] = None
-                conversionSettings["-start_number_out"] = None
+            ksuSite = custom_login.get("ksuSite", "")
+            ksuProjectName = custom_login.get("ksuProjectName", "")
+            ksuUsername = custom_login.get("ksuUsername", "")
+            ksuPw = custom_login.get("ksuPw", "")
 
-        self.core.media.convertMedia(
-            inputpath,
-            startNum,
-            outputpath,
-            settings=conversionSettings
+        if not ksuSite or not ksuProjectName:
+            QMessageBox.warning(
+                self.core.messageParent,
+                "Kitsu",
+                "Not all required information for the Kitsu integration are configured.\nPlease check Project Settings -> Kitsu.",
+            )
+            return False
+
+        if not ksuUsername or not ksuPw:
+            QMessageBox.warning(
+                self.core.messageParent,
+                "Kitsu",
+                "Not all required information for the Kitsu user login are configured.\nPlease check User Settings -> Kitsu.",
+            )
+            return False
+
+        self.project_dict = Connect(
+            self, ksuSite, ksuUsername, ksuPw, ksuProjectName, silent=silent
         )
 
-        return outputpath
+        if not isinstance(self.project_dict, dict):
+            self.tokens = None
+            self.project_dict = None
+            return False
 
-    # Open kitsu and direct the user to the correct page
+        return True
+
     def openKitsu(self, obj_name, section):
-        connected = self.connectToKitsu()
-        if connected is False:
+        if not self.connectToKitsu():
             return
 
-        # As we can't get the project ID before connecting to Kitsu,
-        # a blank ID was passed
         if section == "project":
             obj_id = self.project_dict
         else:
             obj_id = getID(self, obj_name, section + "info")
 
-        try:
-            ksuSite = GetUrl(obj_id, section)
-        except Exception as exc:
+        if not obj_id:
             QMessageBox.warning(
-                QWidget(),
+                self.core.messageParent,
                 "Kitsu Sync",
-                "Could not find shot in Kitsu"
+                f"Could not find {section} '{obj_name}' ID in local config. Please sync with Kitsu first.",
             )
-            removeID(self, obj_name, section + "info")
             return
 
-        import webbrowser
+        try:
+            ksuSite = GetUrl(obj_id, section)
+            webbrowser.open(ksuSite)
+        except Exception:
+            QMessageBox.warning(
+                self.core.messageParent,
+                "Kitsu Sync",
+                f"Could not find {section} in Kitsu.",
+            )
+            removeID(self, obj_name, section + "info")
 
-        webbrowser.open(ksuSite)
+    # -------------------------------------------------------------------------
+    # HELPER XỬ LÝ ENTITY GIỮA PRISM 1 & PRISM 2
+    # -------------------------------------------------------------------------
+    def _getAssetBasePath(self):
+        if hasattr(self.core, "assetPath"):
+            return self.core.assetPath
+        return self.core.getAssetPath()
 
-    # Download asset info from Kitsu
-    @ err_catcher(name=__name__)
+    def _getShotBasePath(self):
+        if hasattr(self.core, "shotPath"):
+            return self.core.shotPath
+        return self.core.getShotPath()
+
+    def _getShotKey(self, seq_name, shot_name, ep_name=None):
+        key = f"{seq_name}-{shot_name}" if seq_name else shot_name
+        if ep_name:
+            key = f"{ep_name}.{key}"
+        return key
+
+    def _splitShotKey(self, shot_key):
+        ep_name = None
+        rest = shot_key
+        if "." in shot_key and self.project_dict and self.project_dict.get("production_type") == "tvshow":
+            ep_name, rest = shot_key.split(".", 1)
+        if "-" in rest:
+            seq_name, shot_name = rest.split("-", 1)
+        else:
+            shot_name, seq_name = self.core.entities.splitShotname(rest)
+        return ep_name, seq_name, shot_name
+
+    def _createDepartmentAndTask(self, entity_dict, prism_dept, kitsu_task):
+        if not prism_dept:
+            return
+        if hasattr(self.core.entities, "createDepartment"):
+            self.core.entities.createDepartment(
+                prism_dept, entity_dict, createCat=False
+            )
+            if kitsu_task:
+                self.core.entities.createCategory(
+                    entity_dict, prism_dept, kitsu_task
+                )
+        elif hasattr(self.core.entities, "createStep"):
+            e_type = entity_dict.get("type", "shot")
+            target = entity_dict.get("asset_path") if e_type == "asset" else f"{entity_dict.get('sequence')}-{entity_dict.get('shot')}"
+            self.core.entities.createStep(prism_dept, e_type, target, createCat=False)
+            if kitsu_task:
+                self.core.entities.createCategory(e_type, target, prism_dept, kitsu_task)
+
+    def _refreshProjectBrowser(self, origin):
+        if hasattr(origin, "tbw_project") and hasattr(origin.tbw_project, "refreshUI"):
+            origin.tbw_project.refreshUI()
+        elif hasattr(origin, "refreshUI"):
+            origin.refreshUI()
+        else:
+            if hasattr(origin, "refreshAHierarchy"):
+                origin.refreshAHierarchy()
+            if hasattr(origin, "refreshShots"):
+                origin.refreshShots()
+
+    # -------------------------------------------------------------------------
+    # ĐỒNG BỘ ASSETS: KITSU <-> PRISM 2
+    # -------------------------------------------------------------------------
+    @err_catcher(name=__name__)
     def ksuAssetsToLocal(self, origin):
-        connected = self.connectToKitsu()
-        if connected is False:
+        if not self.connectToKitsu():
             return
 
         ksuAssets = GetKitsuAssets(self)
-
         if ksuAssets is False:
             QMessageBox.warning(
                 self.core.messageParent,
@@ -706,226 +738,137 @@ class Prism_Kitsu_Functions(object):
             )
             return
 
-        isEpisode = False
-        if self.project_dict["production_type"] == "tvshow":
-            isEpisode = True
+        isEpisode = self.project_dict.get("production_type") == "tvshow"
+        aBasePath = self._getAssetBasePath()
 
-        # Check what assets needs to be created ##
         createdAssets = []
         updatedAssets = []
         configInfo = {}
 
         for assetData in ksuAssets:
             assetInfo = {}
-
-            # Start by getting the asset type
             assetType = GetAssetType(assetData["entity_type_id"])["name"]
-            assetPath = os.path.join(origin.aBasePath, assetType)
+            rel_parts = [assetType]
 
-            # If project has episodes, get the episode the asset is for
-            if assetData["source_id"] is not None:
-                assetPath = os.path.join(assetPath,
-                                         GetEpisodeName(assetData["source_id"]))
-            else:
-                if isEpisode:
-                    assetPath = os.path.join(assetPath, "Main Pack")
+            if assetData.get("source_id") is not None:
+                rel_parts.append(GetEpisodeName(assetData["source_id"]))
+            elif isEpisode:
+                rel_parts.append("Main Pack")
 
-            # Write out ID to config
+            rel_parts.append(assetData["name"])
+            relAssetPath = "/".join(rel_parts)
+            fullAssetPath = os.path.join(aBasePath, *rel_parts)
+
             assetInfo["objID"] = assetData["id"]
+            entity_dict = {"type": "asset", "asset_path": relAssetPath}
 
-            # Add asset name
-            assetPath = os.path.join(assetPath, assetData["name"])
-
-            # Create folder
-            if not os.path.isdir(assetPath):
-                self.core.entities.createEntity("asset", assetPath)
+            if not os.path.isdir(fullAssetPath):
+                try:
+                    self.core.entities.createEntity(entity_dict)
+                except TypeError:
+                    self.core.entities.createEntity("asset", fullAssetPath)
                 createdAssets.append(assetData["name"])
 
-            # Create steps
             tasks = GetTasksForAsset(assetData)
             for task in tasks:
                 kitsuStep = task["task_type_name"]
-                prismStep = self.getPrismStepFromKitsuStep(kitsuStep)
-                self.core.entities.createStep(prismStep, "asset", assetPath, createCat=False)
-                self.core.entities.createCategory("asset", assetPath, prismStep, kitsuStep)
+                prismStep = self.getPrismStepFromKitsuStep(kitsuStep) or kitsuStep
+                self._createDepartmentAndTask(entity_dict, prismStep, kitsuStep)
 
-            # Process thumbnail
-            tmbID, created, updated = DownloadThumbnail(self,
-                                                        assetData["name"],
-                                                        assetData["preview_file_id"],
-                                                        "Assetinfo")
+            tmbID, created, updated = DownloadThumbnail(
+                self,
+                assetData["name"],
+                assetData.get("preview_file_id"),
+                "Assetinfo",
+                entity=entity_dict,
+            )
             if tmbID == "":
                 removeID(self, assetData["name"], "assetinfo")
             elif tmbID is not False:
                 assetInfo["thumbnailID"] = tmbID
 
-            if (assetData["name"] not in createdAssets
-                    and assetData["name"] not in updatedAssets):
-
+            if assetData["name"] not in createdAssets and assetData["name"] not in updatedAssets:
                 if created:
                     createdAssets.append(assetData["name"])
                 elif updated:
                     updatedAssets.append(assetData["name"])
 
-            # Write description
-            desc, created, updated = DownloadDescription(self,
-                                                         assetData["name"],
-                                                         assetData["description"],
-                                                         "assetinfo")
+            desc, created, updated = DownloadDescription(
+                self,
+                assetData["name"],
+                assetData.get("description"),
+                "assetinfo",
+            )
             if desc is not False:
                 assetInfo["description"] = desc
+                if hasattr(self.core.entities, "setAssetDescription"):
+                    try:
+                        self.core.entities.setAssetDescription(assetData["name"], desc or "")
+                    except Exception:
+                        pass
 
-            if (assetData["name"] not in createdAssets
-                    and assetData["name"] not in updatedAssets):
+            if assetData["name"] not in createdAssets and assetData["name"] not in updatedAssets:
                 if created:
                     createdAssets.append(assetData["name"])
                 elif updated:
                     updatedAssets.append(assetData["name"])
 
-            # Add info to config array
             configInfo[assetData["name"]] = assetInfo
 
         if len(configInfo) > 0:
-            # Write information
             self.core.setConfig(data=configInfo, config="assetinfo")
 
-        # Check and report what assets got added or updated ##
         ReportUpdateInfo(self, createdAssets, updatedAssets, "assets")
 
-        # Check if we should do reverse sync
-        ignore_post_checks = self.core.getConfig("kitsu",
-                                                 "ignorepostchecks",
-                                                 configPath=self.core.prismIni)
-
-        if ignore_post_checks is False:
-
-            # Find not uploaded assets
-            self.core.entities.refreshOmittedEntities()
-            assets = self.core.entities.getAssetPaths()
-            assetnames = []
-            for asset in assets:
-                asset_name = os.path.basename(asset)
-
-                if (not asset_name.startswith(
-                        "_") and asset_name not in self.core.entities.omittedEntities["asset"]):
-                    assetnames.append(asset_name)
-
+        ignore_post_checks = bool(self.getPrjConfig("ignorepostchecks", dft=False))
+        if not ignore_post_checks:
+            assets = self.core.entities.getAssetPaths() if hasattr(self.core.entities, "getAssetPaths") else []
             localAssets = []
-            for localName in assetnames:
-                localID = getID(self, localName, "Assetinfo")
-                if localID is None:
-                    localAssets.append(localName)
+            for asset_full in assets:
+                asset_name = os.path.basename(asset_full)
+                if not asset_name.startswith("_"):
+                    if getID(self, asset_name, "Assetinfo") is None:
+                        localAssets.append(asset_full)
 
             if len(localAssets) > 0:
+                display_names = [os.path.basename(x) for x in localAssets]
                 msg = QMessageBox(
                     QMessageBox.Question,
                     "Kitsu Sync",
-                    "Some local assets don't exist on Kitsu:\n"
-                    + "\n".join(localAssets),
+                    "Some local assets don't exist on Kitsu:\n" + "\n".join(display_names),
                     parent=self.core.messageParent,
                 )
-                msg.addButton("Hide local assets", QMessageBox.YesRole)
                 msg.addButton("Add assets to Kitsu", QMessageBox.YesRole)
                 msg.addButton("Do nothing", QMessageBox.YesRole)
                 msg.addButton("Don't ask again", QMessageBox.YesRole)
-                action = msg.exec_()
+                action = msg.exec()
 
                 if action == 0:
-                    noAccess = []
-                    for i in localAssets:
-                        dstname = os.path.join(origin.aBasePath, "_" + i)
-                        if not os.path.isdir(dstname):
-                            try:
-                                os.rename(
-                                    os.path.join(
-                                        origin.aBasePath,
-                                        i
-                                    ),
-                                    dstname
-                                )
-                            except Exception:
-                                noAccess.append(i)
+                    created_assets, updated_assets = self.createAssets(localAssets)
+                    ReportUpdateInfo(self, created_assets, updated_assets, "assets")
+                elif action == 2:
+                    self.setPrjConfig("ignorepostchecks", True)
 
-                    if len(noAccess) > 0:
-                        msgString = "Acces denied for:\n\n"
+        self._refreshProjectBrowser(origin)
 
-                        for i in noAccess:
-                            msgString += i + "\n"
-
-                        QMessageBox.warning(
-                            self.core.messageParent, "Hide Shots", msgString
-                        )
-                elif action == 1:
-                    created_assets, updated_assets, self.createAssets(
-                        localAssets)
-                    # Report what shots got added or updated
-                    ReportUpdateInfo(self, localAssets,
-                                     updated_assets, "assets")
-                elif action == 3:
-                    QMessageBox.information(
-                        self.core.messageParent,
-                        "Kitsu",
-                        "You can undo this by unchecking \"Ignore post checks\" in the settings.",
-                    )
-                    self.core.setConfig("kitsu",
-                                        "ignorepostchecks",
-                                        True,
-                                        configPath=self.core.prismIni)
-
-        origin.refreshAHierarchy()
-
-    # Upload asset info to Kitsu
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def ksuAssetsToKitsu(self, origin):
-        assets = self.core.entities.getAssetPaths()
-
-        createdAssets = []
-        updatedAssets = []
-        # Create the asset
+        if not self.connectToKitsu():
+            return
+        assets = self.core.entities.getAssetPaths() if hasattr(self.core.entities, "getAssetPaths") else []
         createdAssets, updatedAssets = self.createAssets(assets)
         self.createAssetTasks(assets)
-
-        # Report what shots got added or updated
         ReportUpdateInfo(self, createdAssets, updatedAssets, "assets")
 
-        # Check if we should do reverse sync
-        ignore_post_checks = self.core.getConfig("kitsu",
-                                                 "ignorepostchecks",
-                                                 configPath=self.core.prismIni)
-
-        if ignore_post_checks is False:
-
-            # Time to check if Kitsu has some assets we don't have
-            # Get kitsu assets
-            ksuAssets = GetKitsuAssets(self)
-            if ksuAssets is not False:
-                externalAssets = []
-                # Process all shots ##
-                for asset in ksuAssets:
-                    localID = getID(self, asset["name"], "Assetinfo")
-                    if localID is None:
-                        externalAssets.append(asset["name"])
-
-                if len(externalAssets) > 0:
-                    msg = QMessageBox(
-                        QMessageBox.Question,
-                        "Kitsu Sync",
-                        "Some Kitsu shots don't exist locally:\n"
-                        + "\n".join(externalAssets),
-                        parent=self.core.messageParent,
-                    )
-                    msg.addButton("Sync Kitsu assets", QMessageBox.YesRole)
-                    msg.addButton("Do nothing", QMessageBox.YesRole)
-                    action = msg.exec_()
-
-                    if action == 0:
-                        self.ksuAssetsToLocal(origin)
-
-    # Download shot info from Kitsu
-    @ err_catcher(name=__name__)
+    # -------------------------------------------------------------------------
+    # ĐỒNG BỘ SHOTS: KITSU <-> PRISM 2
+    # -------------------------------------------------------------------------
+    @err_catcher(name=__name__)
     def ksuShotsToLocal(self, origin):
-        ksuShots = GetKitsuShots(self)
+        if not self.connectToKitsu():
+            return
 
+        ksuShots = GetKitsuShots(self)
         if ksuShots is False:
             QMessageBox.warning(
                 self.core.messageParent,
@@ -937,554 +880,315 @@ class Prism_Kitsu_Functions(object):
         createdShots = []
         updatedShots = []
         configInfo = {}
-        # Process all shots ##
+
+        existing_shots = set()
+        if hasattr(self.core.entities, "getShots"):
+            res = self.core.entities.getShots()
+            shots_list = res[1] if isinstance(res, tuple) and len(res) > 1 else res
+            if isinstance(shots_list, list):
+                for s in shots_list:
+                    if isinstance(s, dict):
+                        existing_shots.add(
+                            self._getShotKey(s.get("sequence", ""), s.get("shot", ""), s.get("episode"))
+                        )
+
+        frame_nudge = 1 if bool(self.getPrjConfig("setfirstframeone", dft=False)) else 1001
+
         for shotData in ksuShots:
             shotInfo = {}
+            seq_name = shotData.get("sequence_name") or "no_sequence"
+            shot_short = shotData["name"]
+            ep_name = shotData.get("episode_name")
 
-            # Create shot folders ##
-            shotName = shotData["sequence_name"] + "-" + shotData["name"]
+            shotName = self._getShotKey(seq_name, shot_short, ep_name)
+            shotInfo["objID"] = shotData["id"]
 
-            # Add episode name if exists
-            if "episode_name" in shotData:
-                shotName = shotData["episode_name"] + "." + shotName
+            entity_dict = {
+                "type": "shot",
+                "sequence": seq_name,
+                "shot": shot_short,
+            }
+            if ep_name:
+                entity_dict["episode"] = ep_name
 
-            # Create folder if it doesn't exist
-            if not os.path.isdir(os.path.join(origin.sBasePath, shotName)):
-                self.core.entities.createEntity("shot", shotName)
-
-                createdShots.append(shotName)
-
-                shotInfo["objID"] = shotData["id"]
-
-            # Create steps
-            tasks = GetTasksForShot(shotData)
-            for task in tasks:
-                kitsuStep = task["task_type_name"]
-                prismStep = self.getPrismStepFromKitsuStep(kitsuStep)
-                self.core.entities.createStep(prismStep, "shot", shotName, createCat=False)
-                self.core.entities.createCategory("shot", shotName, prismStep, kitsuStep)
-
-            # As Kitsu allows you to write only one of the start frame and
-            # end frame we need to check them induvidually
-            frame_nudge = int(self.core.getConfig("kitsu",
-                                                  "setFirstFrameOne",
-                                                  configPath=self.core.prismIni) is True)
-            nb_frames = None
-            if shotData["nb_frames"] is not None:
-                nb_frames = int(shotData["nb_frames"])
+            # Tính toán Frame Range từ Kitsu
+            nb_frames = int(shotData["nb_frames"]) if shotData.get("nb_frames") is not None else None
             frame_in = None
             frame_out = None
-            if shotData["data"] is not None:
-                if "frame_in" in shotData["data"]:
-                    frame_in = int(shotData["data"]["frame_in"])
-                if "frame_out" in shotData["data"]:
-                    frame_out = int(shotData["data"]["frame_out"])
+            s_data = shotData.get("data") or {}
+            if s_data.get("frame_in") is not None:
+                frame_in = int(s_data["frame_in"])
+            if s_data.get("frame_out") is not None:
+                frame_out = int(s_data["frame_out"])
 
             if frame_in is not None:
-                if frame_out is None:
-                    frame_out = frame_in + nb_frames
+                if frame_out is None and nb_frames is not None:
+                    frame_out = frame_in + nb_frames - 1
             elif nb_frames is not None:
                 frame_in = frame_nudge
                 frame_out = nb_frames - 1 + frame_nudge
 
-            if frame_in is not None and frame_out is not None:
-                shotRange = self.core.getConfig("shotRanges",
-                                                shotName,
-                                                config="shotinfo")
+            frame_range = [frame_in, frame_out] if (frame_in is not None and frame_out is not None) else None
 
-                prv_frame_in = None
-                prv_frame_out = None
+            if shotName not in existing_shots:
+                try:
+                    if frame_range:
+                        self.core.entities.createEntity(entity_dict, frameRange=frame_range)
+                    else:
+                        self.core.entities.createEntity(entity_dict)
+                except TypeError:
+                    self.core.entities.createEntity("shot", shotName)
+                createdShots.append(shotName)
 
-                if (isinstance(shotRange, (list, yaml.comments.CommentedSeq))
-                        and len(shotRange) == 2):
-                    prv_frame_in = int(shotRange[0])
-                    prv_frame_out = int(shotRange[1])
+            tasks = GetTasksForShot(shotData)
+            for task in tasks:
+                kitsuStep = task["task_type_name"]
+                prismStep = self.getPrismStepFromKitsuStep(kitsuStep) or kitsuStep
+                self._createDepartmentAndTask(entity_dict, prismStep, kitsuStep)
 
-                if (frame_in != prv_frame_in or frame_out != prv_frame_out):
-                    # Update to be connected to shot-name instead of shotRange
-                    self.core.setConfig(
-                        "shotRanges",
-                        shotName,
-                        [frame_in, frame_out],
-                        config="shotinfo"
-                    )
+            if frame_range:
+                if hasattr(self.core.entities, "setShotRange"):
+                    try:
+                        self.core.entities.setShotRange(entity_dict, frame_in, frame_out)
+                    except Exception:
+                        pass
+                shotRange = self.core.getConfig("shotRanges", shotName, config="shotinfo")
+                prv_in, prv_out = (int(shotRange[0]), int(shotRange[1])) if (isinstance(shotRange, (list, tuple)) and len(shotRange) == 2) else (None, None)
+                if frame_in != prv_in or frame_out != prv_out:
+                    self.core.setConfig("shotRanges", shotName, [frame_in, frame_out], config="shotinfo")
+                    if shotName not in createdShots and shotName not in updatedShots:
+                        updatedShots.append(shotName)
 
-                if (
-                    shotName not in createdShots
-                    and shotName not in updatedShots
-                    and (frame_in != prv_frame_in
-                         or frame_out != prv_frame_out)
-                ):
-                    updatedShots.append(shotName)
-
-            # Process thumbnail ##
-            tmbID, created, updated = DownloadThumbnail(self,
-                                                        shotName,
-                                                        shotData["preview_file_id"],
-                                                        "Shotinfo")
+            tmbID, created, updated = DownloadThumbnail(
+                self,
+                shotName,
+                shotData.get("preview_file_id"),
+                "Shotinfo",
+                entity=entity_dict,
+            )
             if tmbID == "":
-                removeID(self, shotName, "assetinfo")
-            elif tmbID is not None:
+                removeID(self, shotName, "shotinfo")
+            elif tmbID is not False and tmbID is not None:
                 shotInfo["thumbnailID"] = tmbID
 
-            if (
-                shotName not in createdShots
-                and shotName not in updatedShots
-            ):
+            if shotName not in createdShots and shotName not in updatedShots:
                 if created:
                     createdShots.append(shotName)
                 elif updated:
                     updatedShots.append(shotName)
 
-            # Add info to config array
             configInfo[shotName] = shotInfo
 
         if len(configInfo) > 0:
-            # Write information
             self.core.setConfig(data=configInfo, config="shotinfo")
 
-        # Report what shots got added or updated
         ReportUpdateInfo(self, createdShots, updatedShots, "shots")
+        self._refreshProjectBrowser(origin)
 
-        # Check if we should do reverse sync
-        ignore_post_checks = self.core.getConfig("kitsu",
-                                                 "ignorepostchecks",
-                                                 configPath=self.core.prismIni)
-
-        if ignore_post_checks is False:
-
-            # Check for shots that does not exist on Kitsu ##
-            for i in os.walk(origin.sBasePath):
-                foldercont = i
-                break
-
-            shotnames = []
-            for shot_name in foldercont[1]:
-                if (not shot_name.startswith(
-                        "_") and shot_name not in self.core.entities.omittedEntities["shot"]):
-                    shotnames.append(shot_name)
-
-            localShots = []
-            for localName in shotnames:
-                localID = getID(self, localName, "shotinfo")
-                if localID is None:
-                    localShots.append(localName)
-
-            if len(localShots) > 0:
-                msg = QMessageBox(
-                    QMessageBox.Question,
-                    "Kitsu Sync",
-                    "Some local shots don't exist on Kitsu:\n"
-                    + "\n".join(localShots),
-                    parent=self.core.messageParent,
-                )
-                msg.addButton("Hide local shots", QMessageBox.YesRole)
-                msg.addButton("Add shots to Kitsu", QMessageBox.YesRole)
-                msg.addButton("Do nothing", QMessageBox.YesRole)
-                msg.addButton("Don't ask again", QMessageBox.YesRole)
-                action = msg.exec_()
-
-                if action == 0:
-                    noAccess = []
-                    for i in localShots:
-                        dstname = os.path.join(origin.sBasePath, "_" + i)
-                        if not os.path.isdir(dstname):
-                            try:
-                                os.rename(
-                                    os.path.join(
-                                        origin.sBasePath,
-                                        i
-                                    ),
-                                    dstname
-                                )
-                            except Exception:
-                                noAccess.append(i)
-
-                    if len(noAccess) > 0:
-                        msgString = "Acces denied for:\n\n"
-
-                        for i in noAccess:
-                            msgString += i + "\n"
-
-                        QMessageBox.warning(
-                            self.core.messageParent, "Hide Shots", msgString
-                        )
-                elif action == 1:
-                    created_shots, updated_shots = self.createShots(localShots)
-                    # Report what shots got added or updated
-                    ReportUpdateInfo(self, created_shots,
-                                     updated_shots, "shots")
-                elif action == 3:
-                    QMessageBox.information(
-                        self.core.messageParent,
-                        "Kitsu",
-                        "You can undo this by unchecking \"Ignore post checks\" in the settings.",
-                    )
-                    self.core.setConfig("kitsu",
-                                        "ignorepostchecks",
-                                        True,
-                                        configPath=self.core.prismIni)
-
-        origin.refreshShots()
-
-    # Upload shot info from Kitsu
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def ksuShotsToKitsu(self, origin):
-        for i in os.walk(origin.sBasePath):
-            foldercont = i
-            break
-
-        self.core.entities.refreshOmittedEntities()
+        if not self.connectToKitsu():
+            return
 
         shot_names = []
-        for shot_name in foldercont[1]:
-            if (not shot_name.startswith(
-                    "_") and shot_name not in self.core.entities.omittedEntities["shot"]):
-                shot_names.append(shot_name)
+        if hasattr(self.core.entities, "getShots"):
+            res = self.core.entities.getShots()
+            shots_list = res[1] if isinstance(res, tuple) and len(res) > 1 else res
+            if isinstance(shots_list, list):
+                for s in shots_list:
+                    if isinstance(s, dict) and not s.get("shot", "").startswith("_"):
+                        shot_names.append(
+                            self._getShotKey(s.get("sequence", ""), s.get("shot", ""), s.get("episode"))
+                        )
 
         created_shots, updated_shots = self.createShots(shot_names)
         self.createShotTasks(shot_names)
-
-        # Report what shots got added or updated
         ReportUpdateInfo(self, created_shots, updated_shots, "shots")
 
-        # Check if we should do reverse sync
-        ignore_post_checks = self.core.getConfig("kitsu",
-                                                 "ignorepostchecks",
-                                                 configPath=self.core.prismIni)
-
-        if ignore_post_checks is False:
-
-            # Time to check if Kitsu has some shots we don't have
-            # Get kitsu shots
-            ksuShots = GetKitsuShots(self)
-
-            if ksuShots is not False:
-                externalShots = []
-                # Process all shots ##
-                for shotData in ksuShots:
-                    # Create shot folders ##
-                    shotName = shotData["sequence_name"] + \
-                        "-" + shotData["name"]
-
-                    # Add episode name if exists
-                    if "episode_name" in shotData:
-                        shotName = shotData["episode_name"] + "." + shotName
-
-                    localID = getID(self, shotName, "Shotinfo")
-                    if localID is None:
-                        externalShots.append(shotName)
-
-                if len(externalShots) > 0:
-                    msg = QMessageBox(
-                        QMessageBox.Question,
-                        "Kitsu Sync",
-                        "Some Kitsu shots don't exist locally:\n"
-                        + "\n".join(externalShots),
-                        parent=self.core.messageParent,
-                    )
-                    msg.addButton("Sync Kitsu shots", QMessageBox.YesRole)
-                    msg.addButton("Do nothing", QMessageBox.YesRole)
-                    action = msg.exec_()
-
-                    if action == 0:
-                        self.ksuShotsToLocal(origin)
-
-    @ err_catcher(name=__name__)
-    def onProjectBrowserClose(self, origin):
-        pass
-
-    @ err_catcher(name=__name__)
-    def onSetProjectStartup(self, origin):
-        pass
-
-    @ err_catcher(name=__name__)
+    # -------------------------------------------------------------------------
+    # TẠO ASSETS / SHOTS / TASKS TRÊN KITSU TỪ PRISM 2
+    # -------------------------------------------------------------------------
+    @err_catcher(name=__name__)
     def createAssets(self, assets):
-        connected = self.connectToKitsu()
-        if connected is False:
+        if not self.connectToKitsu():
             return [], []
 
         created_assets = []
         updated_assets = []
         configInfo = {}
+        aBasePath = self._getAssetBasePath()
+
         for asset_location in assets:
             assetInfo = {}
-            # Remove pre-folder path and remove first character
-            # before os.sep split and remove last object as it's
-            # the name of the asset
-            aBasePath = self.core.getAssetPath()
-            asset_location = asset_location.replace(aBasePath, "")
+            rel_path = os.path.relpath(asset_location, aBasePath) if asset_location.startswith(aBasePath) else asset_location
+            splits = [p for p in rel_path.replace("\\", "/").split("/") if p]
 
-            splits = asset_location[1:].split(os.sep)[:-1]
+            asset_name = splits[-1] if splits else os.path.basename(asset_location)
+            asset_type_name = splits[0] if len(splits) > 1 else "General"
 
-            # If not in any subfolder, assign to the empty asset-type
-            if len(splits) == 0:
-                splits.append("")
+            asset_description = self.core.getConfig(asset_name, "description", config="assetinfo")
+            if len(splits) > 2:
+                sub_str = "/".join(splits[1:-1])
+                asset_description = f"{sub_str} - {asset_description}" if asset_description else sub_str
 
-            asset_name = os.path.basename(asset_location)
-            asset_type_name = splits[0]
+            asset_type_dict, _ = createKitsuAssetType(asset_type_name)
+            asset_dict, created_asset = createKitsuAsset(
+                self.project_dict,
+                asset_type_dict,
+                asset_name,
+                asset_description,
+                extra_data={},
+                episode=None,
+            )
 
-            asset_description = self.core.getConfig(asset_name,
-                                                    "description",
-                                                    config="assetinfo")
-
-            # If asset has subfolders, add to asset_description
-
-            if len(splits) > 1:
-                if asset_description is not None:
-                    asset_description = " - " + str(asset_description)
-                else:
-                    asset_description = ""
-
-                asset_description = "/".join(splits[1:]) + \
-                    str(asset_description)
-
-            # Get preview image
-            previewImgPath = os.path.join(os.path.dirname(self.core.prismIni),
-                                          "Assetinfo",
-                                          "%s_preview.jpg" % asset_name,
-                                          )
-            thumbnailURL = previewImgPath if os.path.isfile(
-                previewImgPath) else None
-
-            asset_type_dict, created_asset_type = createKitsuAssetType(
-                asset_type_name)
-
-            asset_dict, created_asset = createKitsuAsset(self.project_dict,
-                                                         asset_type_dict,
-                                                         asset_name,
-                                                         asset_description,
-                                                         extra_data={},
-                                                         episode=None)
-
-            # Add thumbnail if preview image exists
-            if thumbnailURL is not None and created_asset:
-                while True:
-                    # Get task type dict
-                    if self.publish_type_dict is None:
-                        self.publish_type_dict = getPublishTypeDict(
-                            self, "Asset")
-                        if self.publish_type_dict is None:
-                            if created_asset:
-                                RemoveAsset(asset_dict)
-                            if created_asset_type:
-                                RemoveAssetType(asset_type_dict)
-                            break
-
-                    user_email = self.core.getConfig("kitsu",
-                                                     "ksuusername",
-                                                     configPath=self.core.userini)
-
-                    # Ask user to pick task to add thumbnail to
-                    thumbnail_id = uploadThumbnail(
-                        asset_dict["id"],
-                        thumbnailURL,
-                        self.publish_type_dict,
-                        user_email
-                    )
-                    assetInfo["thumbnailID"] = thumbnail_id
-                    break
-
-            # Write out ID to config
-            if created_asset:
+            if created_asset and asset_dict:
                 assetInfo["objID"] = asset_dict["id"]
                 created_assets.append(asset_name)
-                # Add info to config array
                 configInfo[asset_name] = assetInfo
 
         if len(configInfo) > 0:
-            # Write information
             self.core.setConfig(data=configInfo, config="assetinfo")
 
-        # Clear the publishing type dict
         self.publish_type_dict = None
-
         return created_assets, updated_assets
 
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def createAssetTasks(self, assets):
-        connected = self.connectToKitsu()
-        if connected is False:
+        if not self.connectToKitsu():
             return
+        aBasePath = self._getAssetBasePath()
+        allTaskTypes = getTaskTypes()
 
         for asset_location in assets:
-            # Remove pre-folder path and remove first character
-            # before os.sep split and remove last object as it's
-            # the name of the asset
-            aBasePath = self.core.getAssetPath()
-            assetPath = asset_location.replace(aBasePath, "")
-
-            splits = assetPath[1:].split(os.sep)[:-1]
-
-            # If not in any subfolder, assign to the empty asset-type
-            if len(splits) == 0:
-                splits.append("")
-
-            asset_name = os.path.basename(assetPath)
+            rel_path = os.path.relpath(asset_location, aBasePath) if asset_location.startswith(aBasePath) else asset_location
+            asset_name = os.path.basename(rel_path)
             asset_dict = GetAssetByName(self.project_dict, asset_name)
-            taskTypes = getTaskTypes(asset_dict)
-            taskTypeNames = [x['name'] for x in taskTypes]
-            allTaskTypes = getTaskTypes()
+            if not asset_dict:
+                continue
 
-            scenepath = self.core.getEntityPath(entity="step", asset=assetPath)
-            for root, folders, files in os.walk(scenepath):
-                for step in folders:
-                    kitsuStep = self.getKitsuStepFromPrismStep(step)
-                    if kitsuStep not in taskTypeNames:
-                        task_type = next((x for x in allTaskTypes if x['name'] == kitsuStep), None)
+            existing_tasks = GetTasksForAsset(asset_dict)
+            existing_task_names = [t.get("task_type_name") for t in existing_tasks]
+
+            entity_dict = {"type": "asset", "asset_path": rel_path.replace("\\", "/")}
+            depts = (
+                self.core.entities.getDepartments(entity_dict)
+                if hasattr(self.core.entities, "getDepartments")
+                else []
+            )
+            for dept in depts:
+                kitsuStep = self.getKitsuStepFromPrismStep(dept) or dept
+                if kitsuStep not in existing_task_names:
+                    task_type = next((x for x in allTaskTypes if x["name"] == kitsuStep), None)
+                    if task_type:
                         createKitsuTask(asset_dict, task_type)
-                break
 
-        return
-
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def createShots(self, shots):
-        connected = self.connectToKitsu()
-        if connected is False:
+        if not self.connectToKitsu():
             return [], []
 
         created_shots = []
         updated_shots = []
         configInfo = {}
-        for shot_name in shots:
+
+        for shot_key in shots:
             shotInfo = {}
-            # Get range
-            shotRanges = self.core.getConfig("shotRanges",
-                                             shot_name,
-                                             config="shotinfo"
-                                             )
+            epName, seqName, shotName = self._splitShotKey(shot_key)
+            entity_dict = {"type": "shot", "sequence": seqName, "shot": shotName}
+            if epName:
+                entity_dict["episode"] = epName
 
-            # Get preview image
-            previewImgPath = os.path.join(os.path.dirname(self.core.prismIni),
-                                          "Shotinfo",
-                                          "%s_preview.jpg" % shot_name,
-                                          )
+            shotRanges = None
+            if hasattr(self.core.entities, "getShotRange"):
+                try:
+                    shotRanges = self.core.entities.getShotRange(entity_dict)
+                except Exception:
+                    pass
+            if not shotRanges:
+                shotRanges = self.core.getConfig("shotRanges", shot_key, config="shotinfo")
 
-            # Split names
-            shotName, seqName = self.core.entities.splitShotname(shot_name)
-            if self.project_dict["production_type"] == "tvshow":
-                epName, seqName = seqName.split(".", 1)
-            else:
-                epName = None
+            episode_dict, _ = createKitsuEpisode(self.project_dict, epName)
+            sequence_dict, _ = createKitsuSequence(self.project_dict, seqName, episode_dict)
+            shot_dict, created_shot = createKitsuShot(
+                self.project_dict, sequence_dict, shotName, shotRanges
+            )
 
-            thumbnailURL = previewImgPath if os.path.isfile(
-                previewImgPath) else None
-
-            episode_dict, created_ep = createKitsuEpisode(self.project_dict,
-                                                          epName)
-            sequence_dict, created_seq = createKitsuSequence(self.project_dict,
-                                                             seqName,
-                                                             episode_dict)
-            shot_dict, created_shot = createKitsuShot(self.project_dict,
-                                                      sequence_dict,
-                                                      shotName,
-                                                      shotRanges)
-
-            # Add thumbnail if preview image exists
-            if thumbnailURL is not None and created_shot:
-                while True:
-                    # Get task type dict
-                    if self.publish_type_dict is None:
-                        self.publish_type_dict = getPublishTypeDict(self,
-                                                                    "Shot")
-                        if self.publish_type_dict is None:
-                            if created_shot:
-                                RemoveShot(shot_dict)
-                                created_shot = False
-                            if created_seq:
-                                RemoveSequence(sequence_dict)
-                            if created_ep:
-                                RemoveEpisode(episode_dict)
-                            break
-
-                    user_email = self.core.getConfig("kitsu",
-                                                     "ksuusername",
-                                                     configPath=self.core.userini)
-
-                    # Ask user to pick task to add thumbnail to
-                    thumbnail_id = uploadThumbnail(
-                        shot_dict["id"],
-                        thumbnailURL,
-                        self.publish_type_dict,
-                        user_email
-                    )
-                    shotInfo["thumbnailID"] = thumbnail_id
-                    break
-
-            # Write out ID to config
-            if created_shot:
+            if created_shot and shot_dict:
                 shotInfo["objID"] = shot_dict["id"]
-                created_shots.append(shot_name)
-                # Add info to config array
-                configInfo[shot_name] = shotInfo
+                created_shots.append(shot_key)
+                configInfo[shot_key] = shotInfo
 
         if len(configInfo) > 0:
-            # Write information
             self.core.setConfig(data=configInfo, config="shotinfo")
 
-        # Clear the publishing type dict
         self.publish_type_dict = None
-
         return created_shots, updated_shots
 
-
-    @ err_catcher(name=__name__)
+    @err_catcher(name=__name__)
     def createShotTasks(self, shots):
-        connected = self.connectToKitsu()
-        if connected is False:
+        if not self.connectToKitsu():
             return
+        allTaskTypes = getTaskTypes()
 
-        for shot_name in shots:
-            # Split names
-            shotName, seqName = self.core.entities.splitShotname(shot_name)
-            if self.project_dict["production_type"] == "tvshow":
-                seqPart = seqName
-                epName, seqName = seqName.split(".", 1)
-            else:
-                seqPart = seqName
-                epName = None
-
+        for shot_key in shots:
+            epName, seqName, shotName = self._splitShotKey(shot_key)
             episode_dict = GetEpisodeByName(self.project_dict, epName) if epName else None
             sequence_dict = GetSequenceByName(self.project_dict, seqName, episode_dict)
+            if not sequence_dict:
+                continue
             shot_dict = GetShotByName(sequence_dict, shotName)
-            taskTypes = getTaskTypes(shot_dict)
-            taskTypeNames = [x['name'] for x in taskTypes]
-            allTaskTypes = getTaskTypes()
+            if not shot_dict:
+                continue
 
-            scenepath = self.core.getEntityPath(entity="step", shot=shotName, sequence=seqPart)
-            for root, folders, files in os.walk(scenepath):
-                for step in folders:
-                    kitsuStep = self.getKitsuStepFromPrismStep(step)
-                    if kitsuStep not in taskTypeNames:
-                        task_type = next((x for x in allTaskTypes if x['name'] == kitsuStep), None)
+            existing_tasks = GetTasksForShot(shot_dict)
+            existing_task_names = [t.get("task_type_name") for t in existing_tasks]
+
+            entity_dict = {"type": "shot", "sequence": seqName, "shot": shotName}
+            if epName:
+                entity_dict["episode"] = epName
+
+            depts = (
+                self.core.entities.getDepartments(entity_dict)
+                if hasattr(self.core.entities, "getDepartments")
+                else []
+            )
+            for dept in depts:
+                kitsuStep = self.getKitsuStepFromPrismStep(dept) or dept
+                if kitsuStep not in existing_task_names:
+                    task_type = next((x for x in allTaskTypes if x["name"] == kitsuStep), None)
+                    if task_type:
                         createKitsuTask(shot_dict, task_type)
-                break
-        return
 
-
+    # -------------------------------------------------------------------------
+    # STEP / DEPARTMENT MAPPING TABLE
+    # -------------------------------------------------------------------------
     def populateMappingTable(self, origin):
-        for step in self.core.getConfig(
-            "globals", "pipeline_steps", configPath=self.core.prismIni, dft={}
-        ):
+        steps = []
+        if hasattr(self.core.projects, "getDepartments"):
+            try:
+                steps = [d.get("abbreviation") or d.get("name") for d in self.core.projects.getDepartments()]
+            except Exception:
+                pass
+        if not steps:
+            steps_cfg = self.core.getConfig("globals", "pipeline_steps", config="project") or {}
+            steps = list(steps_cfg.keys()) if isinstance(steps_cfg, dict) else []
+
+        for step in steps:
             rows = origin.tw_steps.rowCount()
             origin.tw_steps.insertRow(rows)
-            prismStepItem = QTableWidgetItem(step)
-            origin.tw_steps.setItem(rows, 0, prismStepItem)
-
+            origin.tw_steps.setItem(rows, 0, QTableWidgetItem(str(step)))
+            origin.tw_steps.setItem(rows, 1, QTableWidgetItem(str(step)))
 
     def getKitsuStepFromPrismStep(self, step):
-        for prismStep, kitsuStep in self.core.getConfig(
-            "kitsu", "mapping", configPath=self.core.prismIni, dft={}
-        ).items():
-            if step == prismStep:
-                return kitsuStep
+        mapping = self.getPrjConfig("mapping", dft={})
+        if isinstance(mapping, dict):
+            return mapping.get(step)
         return None
 
-
     def getPrismStepFromKitsuStep(self, step):
-        for prismStep, kitsuStep in self.core.getConfig(
-            "kitsu", "mapping", configPath=self.core.prismIni, dft={}
-        ).items():
-            if step == kitsuStep:
-                return prismStep
+        mapping = self.getPrjConfig("mapping", dft={})
+        if isinstance(mapping, dict):
+            for prismStep, kitsuStep in mapping.items():
+                if step == kitsuStep:
+                    return prismStep
         return None
