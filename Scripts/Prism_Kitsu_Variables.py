@@ -31,9 +31,16 @@
 # along with Prism.  If not, see <https://www.gnu.org/licenses/>.
 
 
+# -*- coding: utf-8 -*-
+import os
+
+
 class Prism_Kitsu_Variables(object):
     def __init__(self, core, plugin):
-        self.version = "v1.3.1.1"
+        self.version = "v2.0.0-prism2"
         self.pluginName = "Kitsu"
-        self.pluginType = "ProjectManager"
+        self.pluginType = "Custom"
         self.platforms = ["Windows", "Linux", "Darwin"]
+        self.pluginDirectory = os.path.abspath(
+            os.path.dirname(os.path.dirname(__file__))
+        )
