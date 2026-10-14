@@ -8,16 +8,33 @@ minimal stub objects so the modules can be imported without real Qt
 bindings. The stub should only be used for non-UI checks because it won't
 render widgets.
 """
+"""Qt compatibility shim for Prism 2 (PySide6 / qtpy) and legacy PySide2."""
 from __future__ import annotations
 
-import os
-import warnings
-from importlib import import_module
-from types import ModuleType
-from typing import Iterable, Tuple
+try:
+    from qtpy import QtCore, QtGui, QtWidgets
+    from qtpy.QtCore import *
+    from qtpy.QtGui import *
+    from qtpy.QtWidgets import *
+    qt_binding = "qtpy"
+except ImportError:
+    try:
+        from PySide6 import QtCore, QtGui, QtWidgets
+        from PySide6.QtCore import *
+        from PySide6.QtGui import *
+        from PySide6.QtWidgets import *
+        qt_binding = "PySide6"
+    except ImportError:
+        from PySide2 import QtCore, QtGui, QtWidgets
+        from PySide2.QtCore import *
+        from PySide2.QtGui import *
+        from PySide2.QtWidgets import *
+        qt_binding = "PySide2"
 
-__all__ = ["QtCore", "QtGui", "QtWidgets", "qt_binding"]
-
+# Đảm bảo tương thích ngược cho các lệnh gọi .exec_() trên PySide6
+for _cls in (QDialog, QMessageBox, QMenu):
+    if not hasattr(_cls, "exec_") and hasattr(_cls, "exec"):
+        setattr(_cls, "exec_", getattr(_cls, "exec"))
 
 def _import_binding(binding: str) -> Tuple[ModuleType, ModuleType, ModuleType]:
     """Return QtCore, QtGui, QtWidgets modules for the given binding."""
